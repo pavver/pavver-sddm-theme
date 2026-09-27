@@ -19,18 +19,32 @@
   - Відображення поточної дати українською мовою.
 - **💡 Тактильний зворотний зв'язок (Border Pulse Feedback)**:
   - **Успішний вхід**: неоново-зелена пульсація рамки (`#00e676`) з плавним переходом на екран завантаження (кіт-лоадер).
-  - **Помилка пароля**: пароль миттєво очищується, рамка двічі пульсує яскраво-червоним (`#ff3366`) з мікро-вібрацією. Ніяких зайвих текстових повідомлень.
+  - **Помилка входу**: пароль миттєво очищується та знову приховується, повторне надсилання тимчасово блокується, рамка пульсує червоним і з’являється коротке статусне повідомлення.
 - **⚠ Помітний індикатор Caps Lock**:
   - Висококонтрастний попереджувальний бейдж `[ ⚠ CAPS ]` із золотим підсвічуванням та спливаючою підказкою.
 - **🖥 Вбудований селектор робочих середовищ (DE)**:
   - Можливість вибору будь-якого доступного сеансу (Plasma Wayland, Plasma X11, GNOME, Hyprland тощо) безпосередньо у картці користувача.
+- **👤 Ручне введення користувача**:
+  - Пункт «Інший користувач...» доступний у селекторі та автоматично вмикається, якщо SDDM приховує список облікових записів.
+- **⌨ Вбудована віртуальна клавіатура**:
+  - Самодостатня плаваюча EN/UA клавіатура для імені користувача та пароля, яку можна переміщувати й змінювати за розміром.
+  - Escape послідовно закриває селектори та клавіатуру, а клік поза відкритим селектором закриває його.
 - **📦 100% автономність**:
-  - Жодних зовнішніх мережевих запитів, CDN або сторонніх залежностей.
+  - Жодних зовнішніх мережевих запитів або CDN.
   - Шрифт Cascadia Code та всі SVG-вектори постачаються локально всередині теми.
+  - Використовуються лише QML-модулі зі стандартного набору KDE Plasma 6.
 
 ---
 
 ## 🚀 Встановлення
+
+### Системні вимоги
+
+- SDDM, зібраний із Qt 6 (`sddm-greeter-qt6`).
+- KDE Plasma 6 / `plasma-workspace`.
+- QML-модулі `QtQuick`, `QtQuick.Controls`, `QtQuick.Shapes`, `Qt5Compat.GraphicalEffects`, `org.kde.kirigami` та `org.kde.plasma.private.keyboardindicator`.
+
+У повній інсталяції Plasma 6 ці модулі постачаються пакетами Plasma Workspace, Qt 6 Declarative, Qt 6 5Compat і Kirigami. На мінімальних інсталяціях назви пакетів залежать від дистрибутива; для Arch Linux вони є прямими залежностями `plasma-workspace`.
 
 ### Автоматичне встановлення (рекомендовано)
 
@@ -43,9 +57,12 @@ sudo ./install.sh
 ```
 
 Скрипт автоматично:
-1. Скопіює файли теми у `/usr/share/sddm/themes/pavver-sddm-theme`.
-2. Встановить коректні права доступу (`755`).
-3. Активує тему в `/etc/sddm.conf.d/kde_settings.conf` (або `/etc/sddm.conf`).
+
+1. Перевірить наявність Qt 6 версії SDDM і просканує QML-імпорти, якщо доступний `qmlimportscanner`.
+2. Підготує файли в тимчасовому каталозі та атомарно встановить тему в `/usr/share/sddm/themes/pavver-sddm-theme`.
+3. Встановить права `755` для каталогів і `644` для звичайних файлів.
+4. Активує тему через останній override `/etc/sddm.conf.d/zz-pavver-theme.conf`; якщо `/etc/sddm.conf` уже перевизначає тему, точково узгодить і його.
+5. Збереже попередню тему та всі змінені конфігурації в `/var/backups/pavver-sddm-theme/`.
 
 ---
 
@@ -53,12 +70,14 @@ sudo ./install.sh
 
 1. Скопіюйте каталог теми до системної директорії SDDM:
    ```bash
-   sudo cp -r . /usr/share/sddm/themes/pavver-sddm-theme
-   sudo chmod -R 755 /usr/share/sddm/themes/pavver-sddm-theme
+   sudo install -d -m 755 /usr/share/sddm/themes/pavver-sddm-theme
+   sudo cp -R Main.qml metadata.desktop theme.conf preview.png assets components fonts /usr/share/sddm/themes/pavver-sddm-theme/
+   sudo find /usr/share/sddm/themes/pavver-sddm-theme -type d -exec chmod 755 {} +
+   sudo find /usr/share/sddm/themes/pavver-sddm-theme -type f -exec chmod 644 {} +
    ```
 
 2. Увімкніть тему в конфігурації SDDM:
-   Відкрийте `/etc/sddm.conf.d/kde_settings.conf` (або створіть його) і додайте секцію:
+   Відкрийте `/etc/sddm.conf.d/zz-pavver-theme.conf` (або створіть його) і додайте секцію:
    ```ini
    [Theme]
    Current=pavver-sddm-theme
@@ -97,12 +116,15 @@ pavver-sddm-theme/
 │   ├── cat.svg               # Векторний кіт для банера та лоадера
 │   ├── eye_*.svg             # Перемикання видимості пароля
 │   ├── pavver_static_bg.svg  # Фоновий малюнок банера
+│   ├── user_identity.svg     # Локальна резервна іконка користувача
+│   ├── virtual_keyboard_*.svg # Кнопка екранної клавіатури
 │   └── power/actions         # Кнопки вимкнення, перезавантаження та сну
 ├── components/               # Модульні компоненти QML
 │   ├── Clock.qml             # Векторний годинник та дата
 │   ├── CompactLoginCard.qml  # Картка користувача, ввід пароля, DE селектор
 │   ├── PavverAnimatedBackground.qml # Анімований банер з трикутниками
-│   └── PavverCatLoader.qml   # Анімація входу з котиком
+│   ├── PavverCatLoader.qml   # Анімація входу з котиком
+│   └── VirtualKeyboard.qml   # Плаваюча EN/UA екранна клавіатура
 └── fonts/
     └── CascadiaCode.ttf      # Локальний моноширинний векторний шрифт
 ```

@@ -1,22 +1,15 @@
 import QtQuick
 import QtQuick.Controls
 import Qt5Compat.GraphicalEffects
-import org.kde.kirigami 2.20 as Kirigami
-import org.kde.plasma.private.keyboardindicator as KeyboardIndicator
 
 Item {
     id: root
     width: 680
-    height: 180
-
-    // Caps Lock state detection
-    KeyboardIndicator.KeyState {
-        id: capsLockState
-        key: Qt.Key_CapsLock
-    }
+    height: 200
 
     property bool mockCapsLock: false
-    readonly property bool isCapsLockOn: mockCapsLock || (typeof capsLockState !== "undefined" && capsLockState && capsLockState.locked)
+    property bool capsLockActive: false
+    readonly property bool isCapsLockOn: mockCapsLock || capsLockActive
 
     FontLoader {
         id: cascadiaFont
@@ -74,6 +67,18 @@ Item {
     property var userListModel: typeof userModel !== "undefined" ? userModel : null
     property int currentUserIndex: (userListModel && userListModel.lastIndex >= 0) ? userListModel.lastIndex : 0
     property var usersList: []
+    property bool manualUsernameMode: false
+    property string manualUsername: ""
+    property bool virtualKeyboardActive: false
+    property Item virtualKeyboardTarget: passwordInput
+
+    readonly property string rememberedUserName: (userListModel && userListModel.lastUser) ? userListModel.lastUser : ""
+    readonly property int listedUserCount: {
+        if (usersList.length > 0) return usersList.length;
+        if (userListModel && typeof userListModel.count === "number") return userListModel.count;
+        return 0;
+    }
+    readonly property bool manualUsernameRequired: listedUserCount === 0 && rememberedUserName.length === 0
 
     // Helper item with Repeater to safely extract model roles from SDDM QAbstractItemModel
     Item {
@@ -113,11 +118,14 @@ Item {
     }
 
     readonly property string currentUserName: {
+        if (manualUsernameMode || manualUsernameRequired) {
+            return manualUsername.trim();
+        }
         if (usersList.length > currentUserIndex && currentUserIndex >= 0) {
             var u = usersList[currentUserIndex];
             if (u && u.name) return u.name;
         }
-        return (userListModel && userListModel.lastUser) ? userListModel.lastUser : "pavver";
+        return rememberedUserName;
     }
 
     // Desktop Session handling
@@ -169,6 +177,9 @@ Item {
     }
 
     readonly property string currentUserDisplayName: {
+        if (manualUsernameMode || manualUsernameRequired) {
+            return manualUsername.length > 0 ? manualUsername : "Інший користувач";
+        }
         if (usersList.length > currentUserIndex && currentUserIndex >= 0) {
             var u = usersList[currentUserIndex];
             if (u && u.realName) return u.realName;
@@ -183,26 +194,98 @@ Item {
             var u = usersList[currentUserIndex];
             if (u && u.icon) path = u.icon;
         }
-        if (!path) {
+        if (!path && currentUserName.length > 0) {
             path = "/var/lib/AccountsService/icons/" + currentUserName;
         }
         if (path.length > 0 && path.indexOf("://") === -1) {
-            return "file://" + path;
+            return "file://" + path.split("/").map(encodeURIComponent).join("/");
         }
         return path;
     }
 
-    readonly property int userCount: {
-        if (usersList.length > 0) return usersList.length;
-        if (userListModel && typeof userListModel.count === "number") return userListModel.count;
-        return 1;
-    }
+    readonly property int userCount: listedUserCount
+    readonly property bool authenticationBlocked: inputFeedbackState !== "idle"
+    readonly property bool canSubmitLogin: currentUserName.length > 0 && passwordInput.text.length > 0 && !authenticationBlocked
+    readonly property bool canSuspendAction: typeof sddm === "undefined" ? true : sddm.canSuspend
+    readonly property bool canRebootAction: typeof sddm === "undefined" ? true : sddm.canReboot
+    readonly property bool canPowerOffAction: typeof sddm === "undefined" ? true : sddm.canPowerOff
+    readonly property bool hasOpenPopup: userDropdown.visible || sessionDropdown.visible
 
     signal loginRequested(string username, string password, int sessionIndex)
+    signal virtualKeyboardRequested()
 
     property string inputFeedbackState: "idle" // "idle", "success", "error"
     property real pulseAlpha: 1.0
     property real pulseBorderWidth: 1.5
+    property string statusMessage: ""
+    property string statusType: "info"
+
+    function focusUsername() {
+        manualUsernameMode = true;
+        virtualKeyboardTarget = usernameInput;
+        usernameInput.forceActiveFocus();
+    }
+
+    function focusPassword() {
+        virtualKeyboardTarget = passwordInput;
+        passwordInput.forceActiveFocus();
+    }
+
+    function selectListedUser(index) {
+        if (index < 0 || index >= userCount) return;
+        currentUserIndex = index;
+        manualUsernameMode = false;
+        closePopups();
+        clearPassword();
+        clearStatusMessage();
+        focusPassword();
+    }
+
+    function selectManualUser() {
+        closePopups();
+        clearPassword();
+        clearStatusMessage();
+        focusUsername();
+    }
+
+    function clearPassword() {
+        passwordInput.text = "";
+        passwordInput.echoMode = TextInput.Password;
+    }
+
+    function clearStatusMessage() {
+        statusMessage = "";
+        statusType = "info";
+        statusClearTimer.stop();
+    }
+
+    function showStatusMessage(message, type) {
+        statusMessage = message || "";
+        statusType = type || "info";
+        if (statusMessage.length > 0) statusClearTimer.restart();
+    }
+
+    function closePopups() {
+        var hadOpenPopup = hasOpenPopup;
+        userDropdown.visible = false;
+        sessionDropdown.visible = false;
+        return hadOpenPopup;
+    }
+
+    function handleVirtualKeyboardEnter() {
+        if (virtualKeyboardTarget === usernameInput) {
+            if (currentUserName.length > 0) focusPassword();
+        } else {
+            doLogin();
+        }
+    }
+
+    Timer {
+        id: statusClearTimer
+        interval: 4000
+        repeat: false
+        onTriggered: root.clearStatusMessage()
+    }
 
     // Success animation: pulse vibrant green border for 500ms, then trigger loader transition
     SequentialAnimation {
@@ -231,7 +314,12 @@ Item {
     }
 
     function doLogin() {
-        if (passwordInput.text.length > 0 && inputFeedbackState !== "success") {
+        if (authenticationBlocked) return;
+        if (currentUserName.length === 0) {
+            focusUsername();
+        } else if (passwordInput.text.length > 0) {
+            closePopups();
+            clearStatusMessage();
             successPulseAnim.restart();
         }
     }
@@ -242,11 +330,12 @@ Item {
         running: false
         ScriptAction {
             script: {
-                passwordInput.text = "";
+                root.clearPassword();
                 root.inputFeedbackState = "error";
                 root.pulseBorderWidth = 3.0;
                 root.pulseAlpha = 1.0;
-                passwordInput.forceActiveFocus();
+                root.showStatusMessage("Не вдалося увійти", "error");
+                root.focusPassword();
             }
         }
         // Pulse 1 + Tactile Micro-shake
@@ -293,6 +382,7 @@ Item {
     }
 
     function onLoginFailed() {
+        successPulseAnim.stop();
         errorPulseAnim.restart();
     }
 
@@ -364,12 +454,15 @@ Item {
             visible: avatarImg.status === Image.Ready
         }
 
-        // Fallback user icon if image fails to load
-        Kirigami.Icon {
+        // Local fallback keeps the avatar independent from the system icon theme.
+        Image {
             anchors.centerIn: parent
             width: 60
             height: 60
-            source: "user-identity"
+            source: Qt.resolvedUrl("../assets/user_identity.svg")
+            sourceSize: Qt.size(120, 120)
+            smooth: true
+            mipmap: true
             visible: avatarImg.status !== Image.Ready
         }
 
@@ -384,23 +477,23 @@ Item {
 
         MouseArea {
             anchors.fill: parent
-            cursorShape: root.userCount > 1 ? Qt.PointingHandCursor : Qt.ArrowCursor
+            cursorShape: Qt.PointingHandCursor
             onClicked: {
-                if (root.userCount > 1) {
-                    userDropdown.visible = !userDropdown.visible;
-                }
+                userDropdown.visible = !userDropdown.visible;
+                sessionDropdown.visible = false;
             }
         }
     }
 
-    // Right Column (124px height, matching avatar)
+    // Right content leaves room for a compact authentication status line.
     Item {
+        id: rightContent
         anchors.left: avatarContainer.right
         anchors.leftMargin: 24
         anchors.right: parent.right
         anchors.rightMargin: 24
         anchors.verticalCenter: parent.verticalCenter
-        height: 124
+        height: 144
 
         // Top Row: Username, Session Badge, and Power buttons
         Item {
@@ -409,21 +502,25 @@ Item {
             height: root.showSessionBadge ? 50 : 46
             anchors.top: parent.top
 
-            // User name & optional Session Selector column
+            // User and session labels consume only the space left by action buttons.
             Column {
+                id: identityColumn
                 anchors.left: parent.left
+                anchors.right: actionButtonsRow.left
+                anchors.rightMargin: 12
                 anchors.verticalCenter: parent.verticalCenter
                 spacing: 3
 
-                // User name & dropdown indicator
                 Item {
-                    width: userNameRow.width
-                    height: userNameRow.height
+                    width: parent.width
+                    height: 26
 
                     Row {
                         id: userNameRow
+                        width: parent.width
                         spacing: 8
                         anchors.verticalCenter: parent.verticalCenter
+                        visible: !root.manualUsernameMode && !root.manualUsernameRequired
 
                         Text {
                             text: root.currentUserDisplayName
@@ -431,35 +528,74 @@ Item {
                             font.family: root.mainFontFamily
                             font.pixelSize: root.showSessionBadge ? 20 : 22
                             font.bold: true
+                            width: Math.max(0, parent.width - userDropIndicator.width - parent.spacing)
+                            elide: Text.ElideRight
+                            maximumLineCount: 1
                         }
 
                         Text {
+                            id: userDropIndicator
                             text: "▾"
                             color: "#00d2ff"
                             font.pixelSize: 18
-                            visible: root.userCount > 1
                             anchors.verticalCenter: parent.verticalCenter
+                        }
+                    }
+
+                    TextInput {
+                        id: usernameInput
+                        anchors.fill: parent
+                        visible: root.manualUsernameMode || root.manualUsernameRequired
+                        text: root.manualUsername
+                        color: "#ffffff"
+                        selectionColor: "#00b4d8"
+                        selectedTextColor: "#ffffff"
+                        font.family: root.mainFontFamily
+                        font.pixelSize: 18
+                        font.bold: true
+                        clip: true
+                        focus: visible
+                        enabled: !root.authenticationBlocked
+                        onActiveFocusChanged: {
+                            if (activeFocus) {
+                                root.virtualKeyboardTarget = usernameInput;
+                                root.closePopups();
+                            }
+                        }
+                        onTextChanged: {
+                            if (root.manualUsername !== text) root.manualUsername = text;
+                        }
+                        onAccepted: {
+                            if (root.currentUserName.length > 0) root.focusPassword();
+                        }
+
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "Ім'я користувача..."
+                            color: "#666677"
+                            font.family: root.mainFontFamily
+                            font.pixelSize: 16
+                            visible: usernameInput.text.length === 0 && !usernameInput.inputMethodComposing
                         }
                     }
 
                     MouseArea {
                         anchors.fill: parent
-                        cursorShape: root.userCount > 1 ? Qt.PointingHandCursor : Qt.ArrowCursor
+                        visible: !usernameInput.visible
+                        cursorShape: Qt.PointingHandCursor
                         onClicked: {
-                            if (root.userCount > 1) {
-                                userDropdown.visible = !userDropdown.visible;
-                                sessionDropdown.visible = false;
-                            }
+                            userDropdown.visible = !userDropdown.visible;
+                            sessionDropdown.visible = false;
                         }
                     }
                 }
 
-                // Proposed Session Selector Badge (when enabled)
                 Rectangle {
                     id: sessionBadge
                     visible: root.showSessionBadge
                     height: 22
-                    width: sessionBadgeRow.width + 14
+                    width: Math.min(parent.width,
+                        sessionNameText.implicitWidth + sessionDropIndicator.implicitWidth + 20)
                     radius: 6
                     color: sessionBadgeMouse.containsMouse ? "#252525" : "#191919"
                     border.color: sessionBadgeMouse.containsMouse ? "#00d2ff" : "#383838"
@@ -467,19 +603,28 @@ Item {
 
                     Row {
                         id: sessionBadgeRow
-                        anchors.centerIn: parent
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.leftMargin: 7
+                        anchors.rightMargin: 7
+                        anchors.verticalCenter: parent.verticalCenter
                         spacing: 6
 
                         Text {
+                            id: sessionNameText
                             text: root.currentSessionDisplayName
                             color: sessionBadgeMouse.containsMouse ? "#00d2ff" : "#a0a0b0"
                             font.family: root.mainFontFamily
                             font.pixelSize: 12
                             font.bold: true
+                            width: Math.max(0, parent.width - sessionDropIndicator.width - parent.spacing)
+                            elide: Text.ElideRight
+                            maximumLineCount: 1
                             anchors.verticalCenter: parent.verticalCenter
                         }
 
                         Text {
+                            id: sessionDropIndicator
                             text: "▾"
                             color: sessionBadgeMouse.containsMouse ? "#00d2ff" : "#666677"
                             font.pixelSize: 11
@@ -494,9 +639,7 @@ Item {
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {
                             sessionDropdown.visible = !sessionDropdown.visible;
-                            if (sessionDropdown.visible) {
-                                userDropdown.visible = false;
-                            }
+                            if (sessionDropdown.visible) userDropdown.visible = false;
                         }
                     }
                 }
@@ -504,9 +647,10 @@ Item {
 
             // Action Buttons (Keyboard Layout Switcher + Power buttons)
             Row {
+                id: actionButtonsRow
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
-                spacing: 12
+                spacing: 10
 
                 // Keyboard Layout Switcher Button
                 Rectangle {
@@ -554,9 +698,50 @@ Item {
                     ToolTip.delay: 350
                 }
 
+                Rectangle {
+                    id: virtualKeyboardBtn
+                    width: 48
+                    height: 48
+                    radius: 24
+                    color: virtualKeyboardMouse.containsMouse || root.virtualKeyboardActive ? "#152535" : "#282828"
+                    border.color: virtualKeyboardMouse.containsMouse || root.virtualKeyboardActive ? "#00d2ff" : "#3c3c3c"
+                    border.width: 1.5
+
+                    Behavior on color { ColorAnimation { duration: 150 } }
+                    Behavior on border.color { ColorAnimation { duration: 150 } }
+
+                    Image {
+                        anchors.centerIn: parent
+                        width: 28
+                        height: 28
+                        source: virtualKeyboardMouse.containsMouse || root.virtualKeyboardActive
+                            ? Qt.resolvedUrl("../assets/virtual_keyboard_hover.svg")
+                            : Qt.resolvedUrl("../assets/virtual_keyboard_normal.svg")
+                        sourceSize: Qt.size(112, 112)
+                        smooth: true
+                        mipmap: true
+                    }
+
+                    MouseArea {
+                        id: virtualKeyboardMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            root.closePopups();
+                            root.virtualKeyboardRequested();
+                        }
+                    }
+
+                    ToolTip.visible: virtualKeyboardMouse.containsMouse
+                    ToolTip.text: root.virtualKeyboardActive ? "Сховати віртуальну клавіатуру" : "Віртуальна клавіатура"
+                    ToolTip.delay: 350
+                }
+
                 // Suspend
                 Rectangle {
                     width: 48; height: 48; radius: 24
+                    visible: root.canSuspendAction
                     color: suspendMouse.containsMouse ? "#152535" : "#282828"
                     border.color: suspendMouse.containsMouse ? "#00d2ff" : "#3c3c3c"
                     border.width: 1.5
@@ -589,6 +774,7 @@ Item {
                 // Reboot
                 Rectangle {
                     width: 48; height: 48; radius: 24
+                    visible: root.canRebootAction
                     color: rebootMouse.containsMouse ? "#251835" : "#282828"
                     border.color: rebootMouse.containsMouse ? "#c77dff" : "#3c3c3c"
                     border.width: 1.5
@@ -621,6 +807,7 @@ Item {
                 // Shutdown
                 Rectangle {
                     width: 48; height: 48; radius: 24
+                    visible: root.canPowerOffAction
                     color: powerMouse.containsMouse ? "#381520" : "#282828"
                     border.color: powerMouse.containsMouse ? "#ff4d6d" : "#3c3c3c"
                     border.width: 1.5
@@ -649,6 +836,42 @@ Item {
                     ToolTip.text: "Вимкнення"
                     ToolTip.delay: 350
                 }
+            }
+        }
+
+        Row {
+            id: statusRow
+            anchors.left: passInputBox.left
+            anchors.right: passInputBox.right
+            anchors.bottom: passInputBox.top
+            anchors.bottomMargin: 6
+            height: 18
+            spacing: 8
+            visible: root.statusMessage.length > 0
+            opacity: visible ? 1.0 : 0.0
+
+            Behavior on opacity { NumberAnimation { duration: 150 } }
+
+            Rectangle {
+                width: 7
+                height: 7
+                radius: 3.5
+                anchors.verticalCenter: parent.verticalCenter
+                color: root.statusType === "error" ? "#ff4d6d"
+                    : (root.statusType === "success" ? "#00e676" : "#00d2ff")
+            }
+
+            Text {
+                anchors.verticalCenter: parent.verticalCenter
+                width: parent.width - 15
+                text: root.statusMessage
+                color: root.statusType === "error" ? "#ff4d6d"
+                    : (root.statusType === "success" ? "#00e676" : "#00d2ff")
+                font.family: root.mainFontFamily
+                font.pixelSize: 14
+                font.bold: true
+                elide: Text.ElideRight
+                verticalAlignment: Text.AlignVCenter
             }
         }
 
@@ -753,7 +976,15 @@ Item {
                 color: "#ffffff"
                 font.family: root.mainFontFamily
                 font.pixelSize: 18
-                focus: true
+                clip: true
+                focus: !usernameInput.visible
+                enabled: !root.authenticationBlocked
+                onActiveFocusChanged: {
+                    if (activeFocus) {
+                        root.virtualKeyboardTarget = passwordInput;
+                        root.closePopups();
+                    }
+                }
 
                 Behavior on anchors.leftMargin { NumberAnimation { duration: 150 } }
 
@@ -762,7 +993,7 @@ Item {
                     color: "#555566"
                     font.family: root.mainFontFamily
                     font.pixelSize: 17
-                    visible: !passwordInput.text && !passwordInput.activeFocus
+                    visible: passwordInput.text.length === 0 && !passwordInput.inputMethodComposing
                     anchors.verticalCenter: parent.verticalCenter
                 }
 
@@ -770,12 +1001,12 @@ Item {
 
                 Keys.onLeftPressed: {
                     if (!text && root.userCount > 1) {
-                        root.currentUserIndex = (root.currentUserIndex - 1 + root.userCount) % root.userCount;
+                        root.selectListedUser((root.currentUserIndex - 1 + root.userCount) % root.userCount);
                     }
                 }
                 Keys.onRightPressed: {
                     if (!text && root.userCount > 1) {
-                        root.currentUserIndex = (root.currentUserIndex + 1) % root.userCount;
+                        root.selectListedUser((root.currentUserIndex + 1) % root.userCount);
                     }
                 }
             }
@@ -791,7 +1022,7 @@ Item {
                 anchors.verticalCenter: parent.verticalCenter
                 color: eyeMouse.containsMouse ? "#22222c" : "transparent"
                 opacity: passwordInput.text.length > 0 ? 1.0 : 0.45
-                enabled: passwordInput.text.length > 0
+                enabled: passwordInput.text.length > 0 && !root.authenticationBlocked
 
                 Behavior on color { ColorAnimation { duration: 150 } }
                 Behavior on opacity { NumberAnimation { duration: 150 } }
@@ -843,7 +1074,7 @@ Item {
                     if (root.inputFeedbackState === "success") {
                         return "#00e676";
                     }
-                    return passwordInput.text.length > 0 ? (submitMouse.containsMouse ? "#00e5ff" : "#00b4d8") : "#222222";
+                    return root.canSubmitLogin ? (submitMouse.containsMouse ? "#00e5ff" : "#00b4d8") : "#222222";
                 }
 
                 Behavior on color { ColorAnimation { duration: 150 } }
@@ -852,7 +1083,7 @@ Item {
                     anchors.centerIn: parent
                     width: 22
                     height: 22
-                    source: passwordInput.text.length > 0 ? Qt.resolvedUrl("../assets/arrow_submit_active.svg") : Qt.resolvedUrl("../assets/arrow_submit_inactive.svg")
+                    source: root.canSubmitLogin ? Qt.resolvedUrl("../assets/arrow_submit_active.svg") : Qt.resolvedUrl("../assets/arrow_submit_inactive.svg")
                     sourceSize: Qt.size(88, 88)
                     smooth: true
                     mipmap: true
@@ -862,11 +1093,11 @@ Item {
                     id: submitMouse
                     anchors.fill: parent
                     hoverEnabled: true
-                    cursorShape: passwordInput.text.length > 0 ? Qt.PointingHandCursor : Qt.ArrowCursor
+                    cursorShape: root.canSubmitLogin ? Qt.PointingHandCursor : Qt.ArrowCursor
                     onClicked: root.doLogin()
                 }
 
-                ToolTip.visible: submitMouse.containsMouse && passwordInput.text.length > 0
+                ToolTip.visible: submitMouse.containsMouse && root.canSubmitLogin
                 ToolTip.text: "Увійти"
                 ToolTip.delay: 350
             }
@@ -878,7 +1109,7 @@ Item {
         id: userDropdown
         visible: false
         width: 240
-        height: Math.min(root.userCount * 44 + 10, 220)
+        height: Math.min(root.listedUserCount * 44, 176) + 54
         color: "#222222"
         radius: 10
         border.color: "#3a3a3a"
@@ -889,8 +1120,12 @@ Item {
         z: 50
 
         ListView {
+            id: userListView
             anchors.fill: parent
-            anchors.margins: 5
+            anchors.leftMargin: 5
+            anchors.rightMargin: 5
+            anchors.topMargin: 5
+            anchors.bottomMargin: 49
             clip: true
             model: root.usersList.length > 0 ? root.usersList : (root.userListModel ? root.userListModel : null)
             delegate: Rectangle {
@@ -932,12 +1167,37 @@ Item {
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: {
-                        root.currentUserIndex = index;
-                        userDropdown.visible = false;
-                        passwordInput.forceActiveFocus();
-                    }
+                    onClicked: root.selectListedUser(index)
                 }
+            }
+        }
+
+        Rectangle {
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            anchors.margins: 5
+            height: 40
+            radius: 6
+            color: manualUserMouse.containsMouse || root.manualUsernameMode ? "#202c32" : "transparent"
+
+            Text {
+                anchors.left: parent.left
+                anchors.leftMargin: 10
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Інший користувач..."
+                color: root.manualUsernameMode ? "#00d2ff" : "#dddddd"
+                font.family: root.mainFontFamily
+                font.pixelSize: 15
+                font.bold: root.manualUsernameMode
+            }
+
+            MouseArea {
+                id: manualUserMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.selectManualUser()
             }
         }
     }
@@ -1008,10 +1268,19 @@ Item {
                     onClicked: {
                         root.currentSessionIndex = index;
                         sessionDropdown.visible = false;
-                        passwordInput.forceActiveFocus();
+                        root.focusPassword();
                     }
                 }
             }
         }
     }
+    // Prevent user/session changes while an authentication animation is active.
+    MouseArea {
+        anchors.fill: parent
+        z: 1000
+        visible: root.authenticationBlocked
+        hoverEnabled: true
+        acceptedButtons: Qt.AllButtons
+    }
+
 }

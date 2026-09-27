@@ -1,6 +1,7 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import org.kde.kirigami 2.20 as Kirigami
+import org.kde.plasma.private.keyboardindicator as KeyboardIndicator
 
 import "components"
 
@@ -17,6 +18,11 @@ Item {
 
     property bool isLoggingIn: false
 
+    KeyboardIndicator.KeyState {
+        id: capsLockState
+        key: Qt.Key_CapsLock
+    }
+
     // Responsive visibility thresholds for compact displays
     readonly property bool showBanner: root.height >= 520 && root.width >= 750
     readonly property bool showClock: root.width >= 750
@@ -30,7 +36,7 @@ Item {
     }
     readonly property real verticalCardScale: {
         var availH = showBanner ? (root.height - wallpaper.bannerBottom - 20) : (root.height - 40);
-        return Math.min(1.0, Math.max(0.55, availH / 220.0));
+        return Math.min(1.0, Math.max(0.55, availH / (compactLoginCard.height + 40.0)));
     }
     readonly property real cardScale: Math.min(horizontalCardScale, verticalCardScale)
 
@@ -62,7 +68,7 @@ Item {
             if (!root.showBanner) return 0;
             var fromWidth = (root.width * 0.85) / (675.0 / 190.0);
             var maxRatioHeight = root.height * 0.45;
-            var minCardSpace = (180 * root.horizontalCardScale) + 60;
+            var minCardSpace = (compactLoginCard.height * root.horizontalCardScale) + 60;
             var topMargin = Math.round(Math.max(16, root.height * 0.048));
             var maxSpaceHeight = Math.max(100, root.height - topMargin - minCardSpace);
             return Math.min(fromWidth, Math.min(maxRatioHeight, maxSpaceHeight));
@@ -78,6 +84,7 @@ Item {
         property bool uiVisible: true
         property bool blockUI: false
 
+        focus: true
         hoverEnabled: true
         drag.filterChildren: true
         onPressed: uiVisible = true;
@@ -100,7 +107,19 @@ Item {
 
         Keys.onPressed: function(event) {
             uiVisible = true;
-            event.accepted = false;
+            if (event.key === Qt.Key_Escape) {
+                if (compactLoginCard.closePopups()) {
+                    event.accepted = true;
+                } else if (virtualKeyboard.keyboardActive) {
+                    virtualKeyboard.hide();
+                    compactLoginCard.focusPassword();
+                    event.accepted = true;
+                } else {
+                    event.accepted = false;
+                }
+            } else {
+                event.accepted = false;
+            }
         }
 
         // Timer for idle screen fade
@@ -115,9 +134,17 @@ Item {
             }
         }
 
+        MouseArea {
+            anchors.fill: parent
+            visible: compactLoginCard.hasOpenPopup
+            z: 1
+            onClicked: compactLoginCard.closePopups()
+        }
+
         // Row containing Clock and Login Card, perfectly centered as a unified group
         Row {
             id: bottomRow
+            z: 2
             anchors.horizontalCenter: parent.horizontalCenter
             y: root.cardTargetY
             spacing: Math.round(36 * root.cardScale)
@@ -156,8 +183,15 @@ Item {
                     scale: root.cardScale
                     userListModel: userModel
                     showSessionBadge: true
+                    capsLockActive: capsLockState.locked
+                    virtualKeyboardActive: virtualKeyboard.keyboardActive
+
+                    onVirtualKeyboardRequested: {
+                        virtualKeyboard.showHide()
+                    }
 
                     onLoginRequested: function(username, password, sessionIndex) {
+                        virtualKeyboard.hide()
                         root.isLoggingIn = true
                         sddm.login(username, password, sessionIndex)
                     }
@@ -176,6 +210,13 @@ Item {
                 NumberAnimation { duration: 300 }
             }
         }
+
+        VirtualKeyboard {
+            id: virtualKeyboard
+            z: 100
+            inputField: compactLoginCard.virtualKeyboardTarget
+            onEnterPressed: compactLoginCard.handleVirtualKeyboardEnter()
+        }
     }
 
     Connections {
@@ -185,6 +226,8 @@ Item {
             compactLoginCard.onLoginFailed()
         }
         function onLoginSucceeded() {
+            virtualKeyboard.hide()
+            compactLoginCard.closePopups()
             root.isLoggingIn = true
         }
     }
